@@ -8,40 +8,28 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import torchvision.transforms as transforms
-from torchvision.models import resnet18, resnet50
 from tensorboardX import SummaryWriter
 from collections import OrderedDict
 from models import ResNet18, ResNet50
 
 from acsconv.converters import ACSConverter, Conv3dConverter, Conv2_5dConverter
-from medmnist.utils import model_to_syncbn
-from medmnist.dataset import OrganMNIST, NoduleMNIST, FractureMNIST, AdrenalMNIST, VesselMNIST, SynapseMNIST
-from medmnist.evaluator import getAUC, getACC
-from medmnist.info import INFO
+from utils import model_to_syncbn, Transform3D
+import medmnist
+from medmnist import INFO, Evaluator
 
 
-
-def main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pretrained_3d, download):
-
-    flag_to_class3d = {
-        'organmnist3d': OrganMNIST,
-        'nodulemnist3d': NoduleMNIST,
-        'fracturemnist3d': FractureMNIST,
-        'adrenalmnist3d': AdrenalMNIST,
-        'vesselmnist3d': VesselMNIST,
-        'synapsemnist3d': SynapseMNIST
-    }
-
-    DataClass = flag_to_class3d[flag]
+def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run):
 
     lr = 0.001
-    n_epochs = end_epoch
-    milestones = [0.5 * n_epochs, 0.75 * n_epochs]
     gamma=0.1
+    milestones = [0.5 * num_epochs, 0.75 * num_epochs]
 
-    info = INFO[flag]
-    n_classes = len(info["label"])
-    task = info["task"]
+    info = INFO[data_flag]
+    task = info['task']
+    n_channels = 3 if as_rgb else info['n_channels']
+    n_classes = len(info['label'])
+
+    DataClass = getattr(medmnist, info['python_class'])
     
     str_ids = gpu_ids.split(',')
     gpu_ids = []
@@ -55,35 +43,42 @@ def main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pr
     device = torch.device('cuda:{}'.format(gpu_ids[0])) if gpu_ids else torch.device('cpu') 
     
         
-    dir_path = os.path.join(output_root, flag, time.strftime("%y%m%d_%H%M%S"))
-    if not os.path.exists(dir_path):
-        os.makedirs(dir_path)
+    output_root = os.path.join(output_root, data_flag, time.strftime("%y%m%d_%H%M%S"))
+    if not os.path.exists(output_root):
+        os.makedirs(output_root)
 
     print('==> Preparing data...')
+
+    train_transform = Transform3D(mul='random') if shape_transform else Transform3D()
+    eval_transform = Transform3D(mul='0.5') if shape_transform else Transform3D()
      
-    train_dataset = DataClass(root=input_root, 
-                                split='train',
-                                download=download)
-    val_dataset = DataClass(root=input_root, 
-                                split='val',
-                                download=download)
-    test_dataset = DataClass(root=input_root, 
-                                split='test',
-                                download=download)
+    train_dataset = DataClass(split='train', transform=train_transform, download=download, as_rgb=as_rgb)
+    train_dataset_at_eval = DataClass(split='train', transform=eval_transform, download=download, as_rgb=as_rgb)
+    val_dataset = DataClass(split='val', transform=eval_transform, download=download, as_rgb=as_rgb)
+    test_dataset = DataClass(split='test', transform=eval_transform, download=download, as_rgb=as_rgb)
+
     
     train_loader = data.DataLoader(dataset=train_dataset,
                                 batch_size=batch_size,
                                 shuffle=True)
+    train_loader_at_eval = data.DataLoader(dataset=train_dataset_at_eval,
+                                batch_size=batch_size,
+                                shuffle=False)
     val_loader = data.DataLoader(dataset=val_dataset,
                                 batch_size=batch_size,
-                                shuffle=True)
+                                shuffle=False)
     test_loader = data.DataLoader(dataset=test_dataset,
                                 batch_size=batch_size,
-                                shuffle=True)
+                                shuffle=False)
 
     print('==> Building and training model...')
 
-    model = ResNet18(in_channels=3, num_classes=n_classes)  
+    if model_flag == 'resnet18':
+        model = ResNet18(in_channels=n_channels, num_classes=n_classes)
+    elif model_flag == 'resnet50':
+        model = ResNet50(in_channels=n_channels, num_classes=n_classes)
+    else:
+        raise NotImplementedError
 
     if conv=='ACSConv':
         model = model_to_syncbn(ACSConverter(model))
@@ -96,10 +91,29 @@ def main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pr
             model = model_to_syncbn(Conv3dConverter(model, i3d_repeat_axis=None))
     
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+
+    train_evaluator = medmnist.Evaluator(data_flag, 'train')
+    val_evaluator = medmnist.Evaluator(data_flag, 'val')
+    test_evaluator = medmnist.Evaluator(data_flag, 'test')
 
     criterion = nn.CrossEntropyLoss()
+
+    if model_path is not None:
+        model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
+        val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, output_root)
+        test_metrics = test(model, test_evaluator, test_loader, criterion, device, run, output_root)
+
+        print('train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2]) + \
+              'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2]) + \
+              'test  auc: %.5f  acc: %.5f\n' % (test_metrics[1], test_metrics[2]))
+
+    if num_epochs == 0:
+        return
+
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
     
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_'+log for log in logs]
@@ -107,22 +121,22 @@ def main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pr
     test_logs = ['test_'+log for log in logs]
     log_dict = OrderedDict.fromkeys(train_logs+val_logs+test_logs, 0)
     
-    writer = SummaryWriter(log_dir=os.path.join(dir_path, 'Tensorboard_Results'))
+    writer = SummaryWriter(log_dir=os.path.join(output_root, 'Tensorboard_Results'))
 
     best_auc = 0
     best_epoch = 0
+    best_model = model
+
     global iteration
     iteration = 0
 
-    log = '%s\n' % (flag)
-    
-    for epoch in trange(n_epochs):
+    for epoch in trange(num_epochs):
         
         train_loss = train(model, train_loader, criterion, optimizer, device, writer)
         
-        train_metrics = test(model, train_loader, task, criterion, device)
-        val_metrics = test(model, val_loader, task, criterion, device)
-        test_metrics = test(model, test_loader, task, criterion, device)
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run)
+        val_metrics = test(model, val_evaluator, val_loader, criterion, device, run)
+        test_metrics = test(model, test_evaluator, test_loader, criterion, device, run)
         
         scheduler.step()
         
@@ -140,27 +154,30 @@ def main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pr
         if cur_auc > best_auc:
             best_epoch = epoch
             best_auc = cur_auc
+            best_model = model
+
             print('cur_best_auc:', best_auc)
             print('cur_best_epoch', best_epoch)
 
-            state = {
-                'net': model.state_dict(),
-            }
+    state = {
+        'net': model.state_dict(),
+    }
 
-            path = os.path.join(dir_path, 'epoch_%d_model.pth' % (epoch))
-            torch.save(state, path)
+    path = os.path.join(output_root, 'best_model.pth')
+    torch.save(state, path)
 
-            train_log = 'train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2])
-            val_log = 'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2])
-            test_log = 'test  auc: %.5f  acc: %.5f\n' % (test_metrics[1], test_metrics[2])
+    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
+    val_metrics = test(best_model, val_evaluator, val_loader, criterion, device, run, output_root)
+    test_metrics = test(best_model, test_evaluator, test_loader, criterion, device, run, output_root)
 
-            log = log + '%s\n' % (epoch) + train_log + val_log + test_log + '\n'
+    train_log = 'train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2])
+    val_log = 'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2])
+    test_log = 'test  auc: %.5f  acc: %.5f\n' % (test_metrics[1], test_metrics[2])
 
-            print('train AUC: %.5f ACC: %.5f' % (train_metrics[1], train_metrics[2]))
-            print('val AUC: %.5f ACC: %.5f' % (val_metrics[1], val_metrics[2]))
-            print('test AUC: %.5f ACC: %.5f' % (test_metrics[1], test_metrics[2]))
-            
-    with open(os.path.join(os.path.join(output_root, flag), '%s_log.txt' % (flag)), 'a') as f:
+    log = '%s\n' % (data_flag) + train_log + val_log + test_log + '\n'
+    print(log)
+    
+    with open(os.path.join(output_root, '%s_log.txt' % (data_flag)), 'a') as f:
         f.write(log)        
             
     writer.close()
@@ -189,13 +206,11 @@ def train(model, train_loader, criterion, optimizer, device, writer):
     return epoch_loss
 
 
-def test(model, data_loader, task, criterion, device):
-    
-    total_loss = []
+def test(model, evaluator, data_loader, criterion, device, run, save_folder=None):
 
     model.eval()
-    
-    y_true = torch.tensor([]).to(device)
+
+    total_loss = []
     y_score = torch.tensor([]).to(device)
 
     with torch.no_grad():
@@ -209,14 +224,12 @@ def test(model, data_loader, task, criterion, device):
             targets = targets.float().resize_(len(targets), 1)
 
             total_loss.append(loss.item())
-            
-            y_true = torch.cat((y_true, targets), 0)
+
             y_score = torch.cat((y_score, outputs), 0)
 
-        y_true = y_true.cpu().numpy()
         y_score = y_score.detach().cpu().numpy()
-        auc = getAUC(y_true, y_score, task)
-        acc = getACC(y_true, y_score, task)
+        auc, acc = evaluator.evaluate(y_score, save_folder, run)
+
         test_loss = sum(total_loss) / len(total_loss)
 
         return [test_loss, auc, acc]
@@ -226,26 +239,22 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='RUN Baseline model of MedMNIST3D')
 
-    parser.add_argument('--flag',
+    parser.add_argument('--data_flag',
                         default='organmnist3d',
-                        type=str)
-    parser.add_argument('--input_root',
-                        default='./input',
-                        help='input root, the source of dataset files',
                         type=str)
     parser.add_argument('--output_root',
                         default='./output',
                         help='output root, where to save models',
                         type=str)
-    parser.add_argument('--num_epoch',
+    parser.add_argument('--num_epochs',
                         default=100,
-                        help='num of epochs of training',
+                        help='num of epochs of training, the script would only test model if set num_epochs to 0',
                         type=int)
     parser.add_argument('--gpu_ids',
                         default='0',
                         type=str)
     parser.add_argument('--batch_size',
-                        default=128,
+                        default=32,
                         type=int)
     parser.add_argument('--conv',
                         default='ACSConv',
@@ -256,16 +265,39 @@ if __name__ == '__main__':
                         type=str)
     parser.add_argument('--download',
                         action="store_true")
+    parser.add_argument('--as_rgb',
+                        help='to copy channels, tranform shape 1x28x28x28 to 3x28x28x28',
+                        action="store_true")
+    parser.add_argument('--shape_transform',
+                        help='for shape dataset, whether multiply 0.5 at eval',
+                        action="store_true")
+    parser.add_argument('--model_path',
+                        default=None,
+                        help='root of the pretrained model to test',
+                        type=str)
+    parser.add_argument('--model_flag',
+                        default='resnet18',
+                        help='choose backbone, resnet18/resnet50',
+                        type=str)
+    parser.add_argument('--run',
+                        default='model1',
+                        help='to name a standard evaluation csv file, named as {flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv',
+                        type=str)
+
 
     args = parser.parse_args()
-    flag = args.flag
-    input_root = args.input_root
+    data_flag = args.data_flag
     output_root = args.output_root
-    end_epoch = args.num_epoch
+    num_epochs = args.num_epochs
     gpu_ids = args.gpu_ids
     batch_size = args.batch_size
     conv = args.conv
     pretrained_3d = args.pretrained_3d
     download = args.download
-    
-    main(flag, input_root, output_root, end_epoch, gpu_ids, batch_size, conv, pretrained_3d, download)
+    model_flag = args.model_flag
+    as_rgb = args.as_rgb
+    model_path = args.model_path
+    shape_transform = args.shape_transform
+    run = args.run
+
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run)

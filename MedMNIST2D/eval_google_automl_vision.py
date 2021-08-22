@@ -2,11 +2,53 @@ import argparse
 import os
 import numpy as np
 from tqdm import tqdm
+from glob import glob
 from PIL import Image
 import tensorflow as tf
 
-from medmnist.evaluator import getAUC, getACC
-from medmnist.info import INFO
+import medmnist
+from medmnist import INFO, Evaluator
+from medmnist.info import DEFAULT_ROOT
+
+
+def main(data_flag, input_root, output_root, model_dir, run):
+
+    if not os.path.isdir(output_root):
+        os.makedirs(output_root)
+
+    _ = getattr(medmnist, INFO[data_flag]['python_class'])(
+            split="train", root=input_root, download=True)
+    
+    dataroot = os.path.join(input_root, '%s.npz' % (data_flag))
+    npz_file = np.load(dataroot)
+
+    train_img = npz_file['train_images']
+    train_label = npz_file['train_labels']
+    val_img = npz_file['val_images']
+    val_label = npz_file['val_labels']
+    test_img = npz_file['test_images']
+    test_label = npz_file['test_labels']
+
+    label_dict_path = glob(os.path.join(model_dir, '*.txt'))[0]
+    
+    model_path = glob(os.path.join(model_dir, '*.tflite'))[0]
+    
+    idx = []
+    labels = INFO[data_flag]['label']
+    task = INFO[data_flag]['task']
+    with open(label_dict_path) as f:
+        line = f.readline()
+        while line:
+            idx.append(line[:-1].lower())
+            line = f.readline()
+
+    index = []
+    for key in labels:
+        index.append(idx.index(labels[key].lower()))
+
+    test(data_flag, train_img, index, model_path, 'train', output_root, run)
+    test(data_flag, val_img, index, model_path, 'val', output_root, run)
+    test(data_flag, test_img, index, model_path, 'test', output_root, run)
 
 
 def load_tflite(ckpt_path):
@@ -35,122 +77,52 @@ def get_key(dic, val):
             return key
 
 
-def get_metrics(y_true, y_pred, task):
-    auc = getAUC(y_true, y_pred, task)
-    acc = getACC(y_true, y_pred, task)
-    return auc, acc
+def test(data_flag, images, index, model_path, split, output_root, run):
 
+    evaluator = medmnist.Evaluator(data_flag, split)
 
-def test(images, labels, index, ckpt_path, task):
+    tflite_model, input_details, output_details = load_tflite(model_path)
 
-    tflite_model, input_details, output_details = load_tflite(ckpt_path)
-
-    y_true = np.zeros((images.shape[0], labels.shape[1]))
     y_score = np.zeros((images.shape[0], len(index)))
 
     for idx in tqdm(range(images.shape[0])):
-        label = labels[idx]
-        img = images[idx]
-        
+        img = images[idx]    
         score = test_single_img(img, tflite_model, input_details, output_details)[index]        
         score = np.expand_dims(score, axis=0)
-
-        y_true[idx] = np.array([label])
         y_score[idx] = score
 
-    auc, acc = get_metrics(y_true, y_score, task)
+    auc, acc = evaluator.evaluate(y_score, output_root, run)
+    print('%s  auc: %.5f  acc: %.5f' % (split, auc, acc))
 
     return auc, acc
-
-
-def main(flag, input_root, output_root, model_dir, model_id):
-
-    flag_dict = {
-        "pathmnist": 'PathMNIST',
-        "chestmnist": 'ChestMNIST',
-        "dermamnist": 'DermaMNIST',
-        "octmnist": 'OCTMNIST',
-        "pneumoniamnist": 'PneumoniaMNIST',
-        "retinamnist": 'RetinaMNIST',
-        "breastmnist": 'BreastMNIST',
-        "organamnist": 'OrganAMNIST',
-        "organcmnist": 'OrganCMNIST',
-        "organsmnist": 'OrganSMNIST',
-        "bloodmnist": 'BloodMNIST',
-        "tissuemnist": 'TissueMNIST'}
-
-
-    dataroot = os.path.join(input_root, '%s.npz' % (flag))
-    npz_file = np.load(dataroot)
-
-    train_img = npz_file['train_images']
-    train_label = npz_file['train_labels']
-    val_img = npz_file['val_images']
-    val_label = npz_file['val_labels']
-    test_img = npz_file['test_images']
-    test_label = npz_file['test_labels']
-
-    label_dict_path = os.path.join(model_dir, flag, '%s_model%s' % (flag, model_id), '%s_model%s_dict.txt' % (flag_dict[flag], model_id))
-    model_path = os.path.join(model_dir, flag, '%s_model%s' % (flag, model_id), '%s_model%s.tflite' % (flag_dict[flag], model_id))
-
-    idx = []
-    labels = INFO[flag]['label']
-    task = INFO[flag]['task']
-    with open(label_dict_path) as f:
-        line = f.readline()
-        while line:
-            idx.append(line[:-1].lower())
-            line = f.readline()
-
-    index = []
-    for key in labels:
-        index.append(idx.index(labels[key].lower()))
-
-    print('train:')
-    train_auc, train_acc = test(train_img, train_label, index, model_path, task)
-    print('val:')
-    val_auc, val_acc = test(val_img, val_label, index, model_path, task)
-    print('test:')
-    test_auc, test_acc = test(test_img, test_label, index, model_path, task)
-
-    log = '%s%s\n' % (flag, model_id)
-    train_log = 'train  auc: %.5f  acc: %.5f \n' % (train_auc, train_acc)
-    val_log = 'val  auc: %.5f  acc: %.5f \n' % (val_auc, val_acc)
-    test_log = 'test  auc: %.5f  acc: %.5f \n' % (test_auc, test_acc)
-
-    log = log + train_log + val_log + test_log + '\n'
-    print(log)
-
-    if not os.path.isdir(output_root):
-        os.makedirs(output_root)
-    with open(os.path.join(output_root, '%s.txt' % (flag)), 'a') as f:
-        f.write(log)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--flag',
+    parser.add_argument('--data_flag',
                         default='pathmnist',
                         type=str)
     parser.add_argument('--input_root',
-                        default='./input',
+                        default=DEFAULT_ROOT,
                         type=str)
     parser.add_argument('--output_root',
-                        default='./automl_vision_results',
+                        default='./automl_vision',
                         type=str)
-    parser.add_argument('--model_dir',
-                        default='/data/MedMNIST_models/automl_vision',
+    parser.add_argument('--model_path',
+                        default='./MedMNIST_models/pathmnist/automl_vision_1',
+                        help='root of the pretrained model to test',
                         type=str)
-    parser.add_argument('--model_id',
-                        default='1',
+    parser.add_argument('--run',
+                        default='model1',
+                        help='to name a standard evaluation csv file, named as {flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv',
                         type=str)
 
     args = parser.parse_args()
-    flag = args.flag
+    data_flag = args.data_flag
     input_root = args.input_root
-    model_dir = args.model_dir
-    model_id = args.model_id
+    model_path = args.model_path
     output_root = args.output_root
+    run = args.run
 
-    main(flag, input_root, output_root, model_dir, model_id)
+    main(data_flag, input_root, output_root, model_path, run)
