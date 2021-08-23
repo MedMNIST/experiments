@@ -25,7 +25,7 @@ This repository is working with [MedMNIST official code](https://github.com/MedM
 
         pip install --upgrade git+https://github.com/MedMNIST/MedMNIST.git
 
-2. Check whether you have isnstalled the latest [version](https://github.com/MedMNIST/MedMNIST/medmnist/info.py):
+2. Check whether you have isnstalled the latest [version](https://github.com/MedMNIST/MedMNIST/tree/main/medmnist/info.py):
 
         >>> import medmnist
         >>> print(medmnist.__version__)
