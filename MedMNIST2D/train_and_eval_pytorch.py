@@ -3,6 +3,7 @@ import argparse
 import time
 from tqdm import trange
 import numpy as np
+import PIL
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -49,7 +50,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     if resize:
         data_transform = transforms.Compose(
-            [transforms.Resize((224, 224)), 
+            [transforms.Resize((224, 224), interpolation=PIL.Image.NEAREST), 
             transforms.ToTensor(),
             transforms.Normalize(mean=[.5], std=[.5])])
     else:
