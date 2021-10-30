@@ -25,12 +25,12 @@ This repository is working with [MedMNIST official code](https://github.com/MedM
 
         pip install --upgrade git+https://github.com/MedMNIST/MedMNIST.git
 
-2. Check whether you have isnstalled the latest [version](https://github.com/MedMNIST/MedMNIST/tree/main/medmnist/info.py):
+2. Check whether you have installed the latest [version](https://github.com/MedMNIST/MedMNIST/tree/main/medmnist/info.py):
 
         >>> import medmnist
         >>> print(medmnist.__version__)
 
-3. The code requires common Python environments for machine learning; Basicially, it was tested with
+3. The code requires common Python environments for machine learning; Basically, it was tested with
 
 - Python 3 (Anaconda 3.6.3 specifically)
 - PyTorch==1.3.1
@@ -67,5 +67,5 @@ This repository is working with [MedMNIST official code](https://github.com/MedM
         - PyTorch, AutoKeras and Google AutoML Vision are provided for MedMNIST2D.
         - PyTorch and AutoKeras are provided for MedMNIST3D. 
         - If you are using PyTorch model weights, please note that the ResNet18_224 / ResNet50_224 models are trained with images resized to 224 x 224 by `PIL.Image.NEAREST`. 
-        - Snapshots for `auto-sklearn` are not uploaded due to the embarrassingly large model sizes (lots of model emsemble).
+        - Snapshots for `auto-sklearn` are not uploaded due to the embarrassingly large model sizes (lots of model ensemble).
     -  `MedMNIST-experiments/predictions/`: We also provide all standard prediction files by PyTorch, auto-sklearn, AutoKeras and Google AutoML Vision, which works with `medmnist.Evaluator`. Each file is named as `{flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv`, e.g., `bloodmnist_test_[AUC]0.997_[ACC]0.957@autokeras_3.csv`.
