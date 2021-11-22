@@ -23,7 +23,7 @@ This repository is working with [MedMNIST official code](https://github.com/MedM
 
 1. Setup the required environments and install `medmnist` as a standard Python package:
 
-        pip install --upgrade git+https://github.com/MedMNIST/MedMNIST.git
+        pip install medmnist
 
 2. Check whether you have installed the latest [version](https://github.com/MedMNIST/MedMNIST/tree/main/medmnist/info.py):
 
