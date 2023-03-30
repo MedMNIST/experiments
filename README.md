@@ -62,10 +62,10 @@ This repository is working with [MedMNIST official code](https://github.com/MedM
     output_3d = model_3d(input_3d)
     ```
 
-5. Download the model weights and predictions from [OneDrive](https://1drv.ms/f/s!AqZcVxAtazRmjY0SACyTfqyHBqG2tA).
-    -  `MedMNIST-experiments/weights/`: 
+5. Download the model weights and predictions from [Zenodo](https://doi.org/10.5281/zenodo.7782113).
+    -  `weights_*.zip`: 
         - PyTorch, AutoKeras and Google AutoML Vision are provided for MedMNIST2D.
         - PyTorch and AutoKeras are provided for MedMNIST3D. 
         - If you are using PyTorch model weights, please note that the ResNet18_224 / ResNet50_224 models are trained with images resized to 224 x 224 by `PIL.Image.NEAREST`. 
         - Snapshots for `auto-sklearn` are not uploaded due to the embarrassingly large model sizes (lots of model ensemble).
-    -  `MedMNIST-experiments/predictions/`: We also provide all standard prediction files by PyTorch, auto-sklearn, AutoKeras and Google AutoML Vision, which works with `medmnist.Evaluator`. Each file is named as `{flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv`, e.g., `bloodmnist_test_[AUC]0.997_[ACC]0.957@autokeras_3.csv`.
+    -  `predictions.zip`: We also provide all standard prediction files by PyTorch, auto-sklearn, AutoKeras and Google AutoML Vision, which works with `medmnist.Evaluator`. Each file is named as `{flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv`, e.g., `bloodmnist_test_[AUC]0.997_[ACC]0.957@autokeras_3.csv`.
