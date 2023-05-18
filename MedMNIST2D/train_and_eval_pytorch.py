@@ -1,7 +1,10 @@
-import os
 import argparse
+import os
 import time
-from tqdm import trange
+from collections import OrderedDict
+from copy import deepcopy
+
+import medmnist
 import numpy as np
 import PIL
 import torch
@@ -9,13 +12,11 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import torchvision.transforms as transforms
-from torchvision.models import resnet18, resnet50
-from tensorboardX import SummaryWriter
-from collections import OrderedDict
-from models import ResNet18, ResNet50
-
-import medmnist
 from medmnist import INFO, Evaluator
+from models import ResNet18, ResNet50
+from tensorboardX import SummaryWriter
+from torchvision.models import resnet18, resnet50
+from tqdm import trange
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run):
@@ -123,7 +124,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     best_auc = 0
     best_epoch = 0
-    best_model = model
+    best_model = deepcopy(model)
 
     global iteration
     iteration = 0
@@ -151,7 +152,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
         if cur_auc > best_auc:
             best_epoch = epoch
             best_auc = cur_auc
-            best_model = model
+            best_model = deepcopy(model)
             print('cur_best_auc:', best_auc)
             print('cur_best_epoch', best_epoch)
 

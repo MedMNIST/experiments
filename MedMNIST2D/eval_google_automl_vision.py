@@ -1,14 +1,14 @@
 import argparse
 import os
-import numpy as np
-from tqdm import tqdm
 from glob import glob
-from PIL import Image
-import tensorflow as tf
 
 import medmnist
+import numpy as np
+import tensorflow as tf
 from medmnist import INFO, Evaluator
 from medmnist.info import DEFAULT_ROOT
+from PIL import Image
+from tqdm import tqdm
 
 
 def main(data_flag, input_root, output_root, model_dir, run):

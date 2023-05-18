@@ -1,10 +1,10 @@
-import os
 import argparse
-import joblib
-import numpy as np
-import autosklearn.classification
+import os
 
+import autosklearn.classification
+import joblib
 import medmnist
+import numpy as np
 from medmnist import INFO, Evaluator
 from medmnist.info import DEFAULT_ROOT
 

@@ -1,15 +1,15 @@
-import os
 import argparse
+import os
 import time
-import numpy as np
-import tensorflow as tf
+
 import autokeras as ak
 import kerastuner
-from tensorflow.keras.models import load_model
-
 import medmnist
+import numpy as np
+import tensorflow as tf
 from medmnist import INFO, Evaluator
 from medmnist.info import DEFAULT_ROOT
+from tensorflow.keras.models import load_model
 
 
 def main(data_flag, num_trials, input_root, output_root, gpu_ids, run, model_path):
