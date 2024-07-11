@@ -19,7 +19,7 @@ from torchvision.models import resnet18, resnet50
 from tqdm import trange
 
 
-def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run):
+def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download, model_flag, resize, as_rgb, model_path, run):
 
     lr = 0.001
     gamma=0.1
@@ -59,9 +59,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
             [transforms.ToTensor(),
             transforms.Normalize(mean=[.5], std=[.5])])
      
-    train_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb)
-    val_dataset = DataClass(split='val', transform=data_transform, download=download, as_rgb=as_rgb)
-    test_dataset = DataClass(split='test', transform=data_transform, download=download, as_rgb=as_rgb)
+    train_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
+    val_dataset = DataClass(split='val', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
+    test_dataset = DataClass(split='test', transform=data_transform, download=download, as_rgb=as_rgb, size=size)
 
     
     train_loader = data.DataLoader(dataset=train_dataset,
@@ -89,9 +89,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, mode
 
     model = model.to(device)
 
-    train_evaluator = medmnist.Evaluator(data_flag, 'train')
-    val_evaluator = medmnist.Evaluator(data_flag, 'val')
-    test_evaluator = medmnist.Evaluator(data_flag, 'test')
+    train_evaluator = medmnist.Evaluator(data_flag, 'train', size=size)
+    val_evaluator = medmnist.Evaluator(data_flag, 'val', size=size)
+    test_evaluator = medmnist.Evaluator(data_flag, 'test', size=size)
 
     if task == "multi-label, binary-class":
         criterion = nn.BCEWithLogitsLoss()
@@ -256,6 +256,10 @@ if __name__ == '__main__':
                         default=100,
                         help='num of epochs of training, the script would only test model if set num_epochs to 0',
                         type=int)
+    parser.add_argument('--size',
+                        default=28,
+                        help='the image size of the dataset, 28 or 64 or 128 or 224, default=28',
+                        type=int)
     parser.add_argument('--gpu_ids',
                         default='0',
                         type=str)
@@ -288,6 +292,7 @@ if __name__ == '__main__':
     data_flag = args.data_flag
     output_root = args.output_root
     num_epochs = args.num_epochs
+    size = args.size
     gpu_ids = args.gpu_ids
     batch_size = args.batch_size
     download = args.download
@@ -297,4 +302,4 @@ if __name__ == '__main__':
     model_path = args.model_path
     run = args.run
     
-    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run)
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download, model_flag, resize, as_rgb, model_path, run)
