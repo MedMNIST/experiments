@@ -21,7 +21,7 @@ from tqdm import trange
 from utils import Transform3D, model_to_syncbn
 
 
-def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers):
+def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers, amp, skip_epoch_eval):
 
     random.seed(seed)
     np.random.seed(seed)
@@ -48,7 +48,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     if len(gpu_ids) > 0:
         os.environ["CUDA_VISIBLE_DEVICES"]=str(gpu_ids[0])
 
-    device = torch.device('cuda:{}'.format(gpu_ids[0])) if gpu_ids else torch.device('cpu') 
+    # only the selected GPU is visible after the line above, and it is always cuda:0
+    device = torch.device('cuda:0') if gpu_ids else torch.device('cpu')
     
         
     # fixed folder per run (not a timestamp) so a restarted run finds its checkpoint
@@ -113,9 +114,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
     if model_path is not None:
         model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
-        val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, output_root)
-        test_metrics = test(model, test_evaluator, test_loader, criterion, device, run, output_root)
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root, amp=amp)
+        val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, output_root, amp=amp)
+        test_metrics = test(model, test_evaluator, test_loader, criterion, device, run, output_root, amp=amp)
 
         print('train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2]) + \
               'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2]) + \
@@ -127,6 +128,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+    # mixed precision (--amp); disabled, the scaler is a no-op and training is plain fp32
+    scaler = torch.amp.GradScaler('cuda', enabled=amp)
     
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_'+log for log in logs]
@@ -148,7 +151,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     ckpt_path = os.path.join(output_root, 'checkpoint.pth')
     epoch_log_path = os.path.join(output_root, 'epoch_log.csv')
     if os.path.exists(ckpt_path):
-        start_epoch, best_auc, best_epoch, iteration = load_checkpoint(ckpt_path, model, best_model, optimizer, scheduler, device)
+        start_epoch, best_auc, best_epoch, iteration = load_checkpoint(ckpt_path, model, best_model, optimizer, scheduler, scaler, device)
         print('==> Resumed after epoch %d (best val auc %.5f at epoch %d)' % (start_epoch - 1, best_auc, best_epoch))
         trim_epoch_log(epoch_log_path, start_epoch)
     else:
@@ -158,11 +161,17 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     for epoch in trange(start_epoch, num_epochs):
         epoch_start = time.time()
         cur_lr = optimizer.param_groups[0]['lr']
-        train_loss = train(model, train_loader, criterion, optimizer, device, writer)
+        train_loss = train(model, train_loader, criterion, optimizer, device, writer, scaler, amp)
         
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run)
-        val_metrics = test(model, val_evaluator, val_loader, criterion, device, run)
-        test_metrics = test(model, test_evaluator, test_loader, criterion, device, run)
+        if skip_epoch_eval:
+            # model selection only needs val; train/test are evaluated once at the end on the best model
+            train_metrics = [train_loss, float('nan'), float('nan')]
+            val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, amp=amp)
+            test_metrics = [float('nan')] * 3
+        else:
+            train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run, amp=amp)
+            val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, amp=amp)
+            test_metrics = test(model, test_evaluator, test_loader, criterion, device, run, amp=amp)
         
         scheduler.step()
         
@@ -187,7 +196,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
         with open(epoch_log_path, 'a') as f:
             f.write('%d,%g,' % (epoch, cur_lr) + ','.join('%.5f' % v for v in log_dict.values()) + ',%.1f\n' % (time.time() - epoch_start))
-        save_checkpoint(ckpt_path, epoch, model, best_model, optimizer, scheduler, best_auc, best_epoch, iteration)
+        save_checkpoint(ckpt_path, epoch, model, best_model, optimizer, scheduler, scaler, best_auc, best_epoch, iteration)
 
     state = {
         'net': best_model.state_dict(),
@@ -196,9 +205,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     path = os.path.join(output_root, 'best_model.pth')
     torch.save(state, path)
 
-    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
-    val_metrics = test(best_model, val_evaluator, val_loader, criterion, device, run, output_root)
-    test_metrics = test(best_model, test_evaluator, test_loader, criterion, device, run, output_root)
+    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root, amp=amp)
+    val_metrics = test(best_model, val_evaluator, val_loader, criterion, device, run, output_root, amp=amp)
+    test_metrics = test(best_model, test_evaluator, test_loader, criterion, device, run, output_root, amp=amp)
 
     train_log = 'train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2])
     val_log = 'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2])
@@ -211,7 +220,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
         f.write(log)
 
     results = {'dataset': data_flag, 'model': '%s_%s' % (model_flag, conv), 'run': run, 'seed': seed,
-               'best_epoch': best_epoch, 'num_epochs': num_epochs, 'batch_size': batch_size,
+               'best_epoch': best_epoch, 'num_epochs': num_epochs, 'batch_size': batch_size, 'amp': amp,
                'train_auc': train_metrics[1], 'train_acc': train_metrics[2],
                'val_auc': val_metrics[1], 'val_acc': val_metrics[2],
                'test_auc': test_metrics[1], 'test_acc': test_metrics[2]}
@@ -224,9 +233,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     writer.close()
 
 
-def save_checkpoint(path, epoch, model, best_model, optimizer, scheduler, best_auc, best_epoch, iteration):
+def save_checkpoint(path, epoch, model, best_model, optimizer, scheduler, scaler, best_auc, best_epoch, iteration):
     state = {'epoch': epoch, 'net': model.state_dict(), 'best_net': best_model.state_dict(),
-             'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
+             'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'scaler': scaler.state_dict(),
              'best_auc': best_auc, 'best_epoch': best_epoch, 'iteration': iteration,
              'rng': {'python': random.getstate(), 'numpy': np.random.get_state(),
                      'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state_all()}}
@@ -235,12 +244,13 @@ def save_checkpoint(path, epoch, model, best_model, optimizer, scheduler, best_a
     os.replace(path + '.tmp', path)
 
 
-def load_checkpoint(path, model, best_model, optimizer, scheduler, device):
+def load_checkpoint(path, model, best_model, optimizer, scheduler, scaler, device):
     state = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(state['net'])
     best_model.load_state_dict(state['best_net'])
     optimizer.load_state_dict(state['optimizer'])
     scheduler.load_state_dict(state['scheduler'])
+    scaler.load_state_dict(state['scaler'])
     random.setstate(state['rng']['python'])
     np.random.set_state(state['rng']['numpy'])
     torch.set_rng_state(state['rng']['torch'].cpu())
@@ -258,14 +268,16 @@ def trim_epoch_log(path, start_epoch):
         f.writelines(lines[:1] + [l for l in lines[1:] if int(l.split(',')[0]) < start_epoch])
 
 
-def train(model, train_loader, criterion, optimizer, device, writer):
+def train(model, train_loader, criterion, optimizer, device, writer, scaler, amp):
     total_loss = []
     global iteration
 
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         optimizer.zero_grad()
-        outputs = model(inputs.to(device))
+        with torch.autocast('cuda', enabled=amp):
+            outputs = model(inputs.to(device))
+        outputs = outputs.float()
 
         targets = torch.squeeze(targets, 1).long().to(device)
         loss = criterion(outputs, targets)
@@ -274,14 +286,15 @@ def train(model, train_loader, criterion, optimizer, device, writer):
         writer.add_scalar('train_loss_logs', loss.item(), iteration)
         iteration += 1
 
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
     
     epoch_loss = sum(total_loss)/len(total_loss)
     return epoch_loss
 
 
-def test(model, evaluator, data_loader, criterion, device, run, save_folder=None):
+def test(model, evaluator, data_loader, criterion, device, run, save_folder=None, amp=False):
 
     model.eval()
 
@@ -290,7 +303,9 @@ def test(model, evaluator, data_loader, criterion, device, run, save_folder=None
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(data_loader):
-            outputs = model(inputs.to(device))
+            with torch.autocast('cuda', enabled=amp):
+                outputs = model(inputs.to(device))
+            outputs = outputs.float()
         
             targets = torch.squeeze(targets, 1).long().to(device)
             loss = criterion(outputs, targets)
@@ -370,6 +385,12 @@ if __name__ == '__main__':
                         default=0,
                         help='DataLoader worker processes (speed only, does not change training)',
                         type=int)
+    parser.add_argument('--amp',
+                        help='mixed precision (fp16 autocast + GradScaler); off = original fp32',
+                        action='store_true')
+    parser.add_argument('--skip_epoch_eval',
+                        help='per epoch, evaluate only val (used for model selection), not train/test',
+                        action='store_true')
 
 
     args = parser.parse_args()
@@ -389,5 +410,7 @@ if __name__ == '__main__':
     run = args.run
     seed = args.seed
     num_workers = args.num_workers
+    amp = args.amp
+    skip_epoch_eval = args.skip_epoch_eval
 
-    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers)
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers, amp, skip_epoch_eval)
