@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+import random
 import time
 from collections import OrderedDict
 from copy import deepcopy
@@ -19,7 +21,12 @@ from tqdm import trange
 from utils import Transform3D, model_to_syncbn
 
 
-def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run):
+def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers):
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
     lr = 0.001
     gamma=0.1
@@ -44,7 +51,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     device = torch.device('cuda:{}'.format(gpu_ids[0])) if gpu_ids else torch.device('cpu') 
     
         
-    output_root = os.path.join(output_root, data_flag, time.strftime("%y%m%d_%H%M%S"))
+    # fixed folder per run (not a timestamp) so a restarted run finds its checkpoint
+    output_root = os.path.join(output_root, data_flag, run)
     if not os.path.exists(output_root):
         os.makedirs(output_root)
 
@@ -61,16 +69,20 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     
     train_loader = data.DataLoader(dataset=train_dataset,
                                 batch_size=batch_size,
-                                shuffle=True)
+                                shuffle=True,
+                                num_workers=num_workers)
     train_loader_at_eval = data.DataLoader(dataset=train_dataset_at_eval,
                                 batch_size=batch_size,
-                                shuffle=False)
+                                shuffle=False,
+                                num_workers=num_workers)
     val_loader = data.DataLoader(dataset=val_dataset,
                                 batch_size=batch_size,
-                                shuffle=False)
+                                shuffle=False,
+                                num_workers=num_workers)
     test_loader = data.DataLoader(dataset=test_dataset,
                                 batch_size=batch_size,
-                                shuffle=False)
+                                shuffle=False,
+                                num_workers=num_workers)
 
     print('==> Building and training model...')
 
@@ -130,9 +142,22 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
     global iteration
     iteration = 0
+    start_epoch = 0
 
-    for epoch in trange(num_epochs):
-        
+    # resume from the last finished epoch if this run was interrupted
+    ckpt_path = os.path.join(output_root, 'checkpoint.pth')
+    epoch_log_path = os.path.join(output_root, 'epoch_log.csv')
+    if os.path.exists(ckpt_path):
+        start_epoch, best_auc, best_epoch, iteration = load_checkpoint(ckpt_path, model, best_model, optimizer, scheduler, device)
+        print('==> Resumed after epoch %d (best val auc %.5f at epoch %d)' % (start_epoch - 1, best_auc, best_epoch))
+        trim_epoch_log(epoch_log_path, start_epoch)
+    else:
+        with open(epoch_log_path, 'w') as f:
+            f.write('epoch,lr,' + ','.join(log_dict.keys()) + ',epoch_seconds\n')
+
+    for epoch in trange(start_epoch, num_epochs):
+        epoch_start = time.time()
+        cur_lr = optimizer.param_groups[0]['lr']
         train_loss = train(model, train_loader, criterion, optimizer, device, writer)
         
         train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run)
@@ -160,8 +185,12 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
             print('cur_best_auc:', best_auc)
             print('cur_best_epoch', best_epoch)
 
+        with open(epoch_log_path, 'a') as f:
+            f.write('%d,%g,' % (epoch, cur_lr) + ','.join('%.5f' % v for v in log_dict.values()) + ',%.1f\n' % (time.time() - epoch_start))
+        save_checkpoint(ckpt_path, epoch, model, best_model, optimizer, scheduler, best_auc, best_epoch, iteration)
+
     state = {
-        'net': model.state_dict(),
+        'net': best_model.state_dict(),
     }
 
     path = os.path.join(output_root, 'best_model.pth')
@@ -179,9 +208,54 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     print(log)
     
     with open(os.path.join(output_root, '%s_log.txt' % (data_flag)), 'a') as f:
-        f.write(log)        
-            
+        f.write(log)
+
+    results = {'dataset': data_flag, 'model': '%s_%s' % (model_flag, conv), 'run': run, 'seed': seed,
+               'best_epoch': best_epoch, 'num_epochs': num_epochs, 'batch_size': batch_size,
+               'train_auc': train_metrics[1], 'train_acc': train_metrics[2],
+               'val_auc': val_metrics[1], 'val_acc': val_metrics[2],
+               'test_auc': test_metrics[1], 'test_acc': test_metrics[2]}
+    with open(os.path.join(output_root, 'results.json'), 'w') as f:
+        json.dump(results, f, indent=2)
+
+    # the run is finished; best_model.pth is kept, the resume checkpoint is not needed
+    os.remove(ckpt_path)
+
     writer.close()
+
+
+def save_checkpoint(path, epoch, model, best_model, optimizer, scheduler, best_auc, best_epoch, iteration):
+    state = {'epoch': epoch, 'net': model.state_dict(), 'best_net': best_model.state_dict(),
+             'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
+             'best_auc': best_auc, 'best_epoch': best_epoch, 'iteration': iteration,
+             'rng': {'python': random.getstate(), 'numpy': np.random.get_state(),
+                     'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state_all()}}
+    # write to a temp file first so a kill during saving never leaves a broken checkpoint
+    torch.save(state, path + '.tmp')
+    os.replace(path + '.tmp', path)
+
+
+def load_checkpoint(path, model, best_model, optimizer, scheduler, device):
+    state = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(state['net'])
+    best_model.load_state_dict(state['best_net'])
+    optimizer.load_state_dict(state['optimizer'])
+    scheduler.load_state_dict(state['scheduler'])
+    random.setstate(state['rng']['python'])
+    np.random.set_state(state['rng']['numpy'])
+    torch.set_rng_state(state['rng']['torch'].cpu())
+    torch.cuda.set_rng_state_all([s.cpu() for s in state['rng']['cuda']])
+    return state['epoch'] + 1, state['best_auc'], state['best_epoch'], state['iteration']
+
+
+def trim_epoch_log(path, start_epoch):
+    # drop rows for epochs after the checkpoint (they will be run again)
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        lines = f.readlines()
+    with open(path, 'w') as f:
+        f.writelines(lines[:1] + [l for l in lines[1:] if int(l.split(',')[0]) < start_epoch])
 
 
 def train(model, train_loader, criterion, optimizer, device, writer):
@@ -288,6 +362,14 @@ if __name__ == '__main__':
                         default='model1',
                         help='to name a standard evaluation csv file, named as {flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv',
                         type=str)
+    parser.add_argument('--seed',
+                        default=0,
+                        help='random seed for python, numpy and torch',
+                        type=int)
+    parser.add_argument('--num_workers',
+                        default=0,
+                        help='DataLoader worker processes (speed only, does not change training)',
+                        type=int)
 
 
     args = parser.parse_args()
@@ -305,5 +387,7 @@ if __name__ == '__main__':
     model_path = args.model_path
     shape_transform = args.shape_transform
     run = args.run
+    seed = args.seed
+    num_workers = args.num_workers
 
-    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run)
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run, seed, num_workers)
